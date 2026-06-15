@@ -1,22 +1,28 @@
 @startuml context_as_is
 !include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Context.puml
 
-title C4 Context (As-Is) — «Тёплый дом», монолит
+title C4 Context (As-Is) - «Тёплый дом», монолит
 
 Person(user, "Пользователь", "Владелец дома. Смотрит температуру через веб-интерфейс")
 Person(specialist, "Специалист по подключению", "Выезжает и подключает датчики/реле к системе")
 
-System(monolith, "Smart Home (монолит на Go)", "Обработка запросов, бизнес-логика, работа с данными в одном приложении")
+System(monolith, "Smart Home (монолит на Go)", "REST API, бизнес-логика, CRUD сенсоров и доступ к данным - в одном приложении")
 
-System_Ext(sensor, "Датчик температуры / реле", "Установлен в доме. Отдаёт температуру по запросу сервера (pull)")
+System_Ext(tempapi, "temperature-api", "Отдельный HTTP-сервис (отдельный контейнер). Отдаёт показания температуры по запросу (pull)")
+System_Ext(sensor, "Датчик температуры / реле", "Физическое устройство, установлено в доме")
 
-Rel(user, monolith, "Смотрит температуру, управляет сенсорами", "HTTP/JSON, синхронно")
+Rel(user, monolith, "Смотрит температуру, CRUD сенсоров", "HTTP/JSON, синхронно")
 Rel(specialist, sensor, "Устанавливает и подключает", "Ручной выезд")
-Rel(monolith, sensor, "Опрашивает температуру", "HTTP, синхронно, pull")
+Rel(monolith, tempapi, "Опрашивает температуру - по запросу на каждый сенсор (pull)", "HTTP, синхронно")
+Rel(tempapi, sensor, "Абстрагирует датчик (в текущей реализации - стаб)", "-")
 
 note right of monolith
-  Управление отоплением в коде НЕ реализовано
-  (есть только тип устройства "temperature").
+  • Управление отоплением в коде НЕ реализовано
+    (есть только тип устройства "temperature").
+  • Монолит ходит не в устройство напрямую, а в
+    ОТДЕЛЬНЫЙ сервис temperature-api (TemperatureService).
+  • GetSensors опрашивает temperature-api по одному
+    запросу на сенсор -> N+1.
 end note
 
 @enduml

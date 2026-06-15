@@ -1,0 +1,38 @@
+@startuml code_command_sequence
+title Code (Sequence) - реактивный сценарий «влажность -> вентиляция»
+
+actor "Датчик влажности" as sensor
+participant "Connectivity GW" as gw
+queue "Event Bus" as bus
+participant "Telemetry" as tel
+participant "Scenario" as scn
+participant "Control" as ctl
+participant "Device Mgmt" as dm
+participant "Исполнитель (вентилятор)" as act
+
+== South-bound: телеметрия (push) ==
+sensor -> gw : показание (MQTT/HTTP)
+gw -> bus : publish TelemetryReceived
+bus -> tel : TelemetryReceived
+tel -> tel : сохранить time-series
+
+== Хореография: триггер сценария ==
+bus -> scn : TelemetryReceived (подписка)
+scn -> scn : Rule Engine: влажность > 70%?
+
+== Оркестрация: исполнение действия ==
+scn -> ctl : POST команда setState(vent, on)
+ctl -> dm : GET профиль/capabilities(vent)
+dm --> ctl : профиль (методы, маппинг payload)
+ctl -> ctl : валидация + desired state
+ctl -> bus : publish DeviceCommand(vent, on)
+
+== South-bound: доставка команды ==
+bus -> gw : DeviceCommand (подписка)
+gw -> act : команда в протоколе устройства
+act --> gw : подтверждение
+gw -> bus : publish CommandAck / StateReported
+bus -> ctl : CommandAck (подписка)
+ctl -> ctl : обновить reported state
+
+@enduml

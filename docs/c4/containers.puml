@@ -1,0 +1,89 @@
+@startuml containers
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title C4 Containers (To-Be) - экосистема «Тёплый дом» (SaaS)
+
+LAYOUT_TOP_DOWN()
+skinparam nodesep 50
+skinparam ranksep 70
+
+Person(user, "Пользователь", "Владелец дома. Веб/мобильный клиент: самообслуживание, телеметрия, сценарии")
+System_Ext(device, "Устройства партнёров", "Датчики (температура, CO, влажность) и исполнители (нагреватель, свет, ворота, камера). Разные протоколы")
+
+System_Boundary(sb, "Тёплый дом") {
+
+  Container(apigw, "API Gateway", "Go/Envoy", "Единый вход для клиентов: маршрутизация, аутентификация, rate-limit")
+
+  Container(identity, "Identity / User", "Go", "Аккаунты, аутентификация, привязка пользователь->дом->устройство")
+  ContainerDb(identity_db, "Identity DB", "PostgreSQL", "Пользователи, токены, владение")
+
+  Container(devmgmt, "Device Management", "Go", "Реестр устройств + device-профили/capabilities (датчики и исполнители)")
+  ContainerDb(devmgmt_db, "Device DB", "PostgreSQL", "Устройства, типы, профили, привязка к владельцу")
+
+  Container(telemetry, "Telemetry", "Go", "Приём, хранение и отдача показаний всех сенсоров")
+  ContainerDb(telemetry_db, "Telemetry DB", "TimescaleDB", "Time-series показаний")
+
+  Container(control, "Control", "Go", "North-bound, generic. Абстрактные команды, desired/reported state, маршрутизация к адаптерам")
+  ContainerDb(control_db, "Control DB", "PostgreSQL", "Состояние устройств, команды")
+
+  Container(scenario, "Scenario / Automation", "Go", "Пользовательские правила. Подписан на события телеметрии, оркестрирует команды через Control")
+  ContainerDb(scenario_db, "Scenario DB", "PostgreSQL", "Правила, сценарии")
+
+  Container(video, "Наблюдение (Observation)", "Go", "Удалённое наблюдение. Метаданные камер и проксирование/выдача потока")
+  ContainerDb(video_db, "Observation DB", "PostgreSQL", "Метаданные камер, доступы")
+
+  Container(mqtt, "MQTT Broker", "EMQX / Mosquitto", "Device session layer: держит постоянные коннекты устройств, топики, QoS, retained, LWT, ACL по home_id")
+
+  Container(conngw, "Device Connectivity Gateway", "Go", "South-bound. MQTT-клиент брокера + адаптеры (HTTP/…). Нормализует payload и мостит в Event Bus")
+
+  ContainerQueue(bus, "Event Bus", "Kafka / RabbitMQ", "Асинхронный обмен: телеметрия, команды, события сценариев")
+}
+
+' --- North-bound (к пользователю) ---
+Rel(user, apigw, "Использует", "HTTPS/REST")
+Rel(apigw, identity, "Аутентификация/авторизация", "REST")
+Rel(apigw, devmgmt, "Управление устройствами", "REST")
+Rel(apigw, telemetry, "Чтение показаний", "REST")
+Rel(apigw, control, "Команды устройствам", "REST")
+Rel(apigw, scenario, "Управление сценариями", "REST")
+Rel(apigw, video, "Просмотр наблюдения", "REST")
+
+Rel_D(identity, identity_db, "Читает/пишет", "SQL")
+Rel_D(devmgmt, devmgmt_db, "Читает/пишет", "SQL")
+Rel_D(telemetry, telemetry_db, "Читает/пишет", "SQL")
+Rel_D(control, control_db, "Читает/пишет", "SQL")
+Rel_D(scenario, scenario_db, "Читает/пишет", "SQL")
+Rel_D(video, video_db, "Читает/пишет", "SQL")
+
+' --- Async через шину ---
+Rel(conngw, bus, "Публикует телеметрию, подписан на команды", "events")
+Rel(devmgmt, bus, "Подписан на presence (online/offline, last-seen)", "events")
+Rel(telemetry, bus, "Подписан на телеметрию", "events")
+Rel(control, bus, "Публикует команды, подписан на подтверждения", "events")
+Rel(scenario, bus, "Подписан на телеметрию (хореография)", "events")
+
+' --- Резолв профиля и оркестрация ---
+Rel(control, devmgmt, "Резолвит device-профиль/capabilities", "REST")
+Rel(scenario, control, "Оркестрирует команды", "REST")
+
+' --- South-bound (к устройству) ---
+Rel(video, device, "Поток наблюдения (отдельный data plane)", "RTSP/WebRTC")
+Rel(device, mqtt, "Pub телеметрии, sub команд", "MQTT/TLS")
+Rel(conngw, mqtt, "Sub телеметрии, pub команд", "MQTT")
+BiRel(device, conngw, "HTTP/CoAP, минуя брокер:\npush от устройства + poll по таймеру", "HTTP/CoAP")
+
+note as N1
+  Три плоскости одного устройства:
+  • Device Management - ОПИСАНИЕ (идентичность, владелец, профиль/capabilities)
+  • Control - КОМАНДЫ и состояние (desired/reported)
+  • Connectivity Gateway - ТРАНСПОРТ (протокол, сетевая сессия)
+  Connectivity не зависит от DM: Control резолвит профиль у DM
+  и кладёт готовый payload в команду.
+
+  Poller в conngw опрашивает pull-only устройства по таймеру
+  (вкл. legacy temperature-api на время миграции) и публикует
+  телеметрию в шину - см. components_conngw.puml.
+end note
+
+
+@enduml

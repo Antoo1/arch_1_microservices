@@ -1,0 +1,33 @@
+@startuml components_control
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+title C4 Components - Control (north-bound, generic)
+
+Container(scenario, "Scenario / Automation", "Go", "Оркестрирует команды")
+Container(devmgmt, "Device Management", "Go", "Отдаёт device-профиль/capabilities")
+ContainerDb(control_db, "Control DB", "PostgreSQL", "Desired/reported state")
+ContainerQueue(bus, "Event Bus", "Kafka/RabbitMQ", "Команды и подтверждения")
+
+Container_Boundary(control, "Control") {
+  Component(api, "Command API", "Go/gin", "Приём абстрактных команд (setState и т.п.)")
+  Component(validator, "Capability Validator", "Go", "Проверяет, что команда допустима для профиля устройства")
+  Component(resolver, "Profile Resolver", "Go", "Запрашивает профиль из Device Management, кэширует")
+  Component(state, "State Manager", "Go", "Хранит desired/reported state, согласует расхождения")
+  Component(dispatcher, "Command Dispatcher", "Go", "Публикует команду в шину для нужного протокольного адаптера")
+  Component(ack, "Ack/State Consumer", "Go", "Слушает подтверждения и отчёты о состоянии из шины")
+  Component(repo, "Repository", "Go/pgx", "Доступ к Control DB")
+}
+
+Rel(scenario, api, "Команда устройству", "REST")
+Rel(api, resolver, "Получить профиль")
+Rel(resolver, devmgmt, "Профиль/capabilities", "REST")
+Rel(api, validator, "Проверить команду")
+Rel(validator, state, "Обновить desired state")
+Rel(state, dispatcher, "Отправить команду")
+Rel(dispatcher, bus, "Публикует команду", "events")
+Rel(ack, bus, "Подписан на подтверждения/состояние", "events")
+Rel(ack, state, "Обновляет reported state")
+Rel(state, repo, "Читает/пишет")
+Rel(repo, control_db, "SQL")
+
+@enduml

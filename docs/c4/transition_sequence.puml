@@ -1,0 +1,46 @@
+@startuml transition_sequence
+title Transition — обслуживание GET /sensors в overlap + shadow-поток поллера
+
+actor "Клиент\n(фронт)" as cl
+participant "API Gateway\n(strangler-фасад)" as gw
+participant "Монолит\n(legacy)" as mono
+participant "Device Mgmt" as dm
+participant "Telemetry" as tel
+participant "Connectivity GW\n(поллер)" as conngw
+queue "Event Bus" as bus
+participant "temperature-api\n(legacy pull)" as tapi
+
+== Фон: shadow-поток (непрерывно, не зависит от клиента) ==
+loop по таймеру на каждый pull-источник
+  conngw -> tapi : GET /temperature?location=...
+  tapi --> conngw : { value, ts }
+  conngw -> conngw : нормализация + dedup
+  conngw -> bus : publish TelemetryReceived
+  bus -> tel : сохранить time-series
+end
+
+== Чтение: путь /sensors ЕЩЁ НЕ мигрирован (фаза 1) ==
+cl -> gw : GET /api/v1/sensors
+gw -> mono : проксирует (путь у легаси)
+mono -> tapi : pull inline (старое поведение, N+1)
+tapi --> mono : значения
+mono --> gw : 200 sensors[]
+gw --> cl : 200 (контракт неизменен)
+
+== Чтение: путь /sensors УЖЕ мигрирован (фаза 2+) ==
+cl -> gw : GET /api/v1/sensors
+gw -> dm : список устройств
+dm --> gw : devices[]
+gw -> tel : последние показания
+tel --> gw : readings[]
+gw -> gw : склейка в старый формат ответа
+gw --> cl : 200 (тот же контракт, данные из новых сервисов)
+
+note across
+  Переключение пути — это изменение конфигурации роутинга в GW,
+  а НЕ правка монолита. Клиент обоих случаев не различает.
+  N+1 исчезает в фазе 2+: чтение идёт из Telemetry,
+  а опрос temperature-api делает фоновый поллер.
+end note
+
+@enduml
