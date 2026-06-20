@@ -1,5 +1,5 @@
 @startuml transition_sequence
-title Transition — обслуживание GET /sensors в overlap + shadow-поток поллера
+title Transition - обслуживание GET /sensors в overlap + shadow-поток поллера
 
 actor "Клиент\n(фронт)" as cl
 participant "API Gateway\n(strangler-фасад)" as gw
@@ -37,7 +37,7 @@ gw -> gw : склейка в старый формат ответа
 gw --> cl : 200 (тот же контракт, данные из новых сервисов)
 
 note across
-  Переключение пути — это изменение конфигурации роутинга в GW,
+  Переключение пути - это изменение конфигурации роутинга в GW,
   а НЕ правка монолита. Клиент обоих случаев не различает.
   N+1 исчезает в фазе 2+: чтение идёт из Telemetry,
   а опрос temperature-api делает фоновый поллер.

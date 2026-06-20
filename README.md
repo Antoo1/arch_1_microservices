@@ -68,6 +68,52 @@
 [C4 context diagram as is](docs/c4/context_as_is.puml)
 ```
 
+### 6. Трассировка As-Is -> To-Be (мост к Заданию 2)
+
+Таблица связывает каждый элемент существующей системы с его местом в целевой
+архитектуре - чтобы переход был явным и проверяемым, а не «спроектированным с нуля».
+
+**Тип перехода:** `replace` - заменяется фасадом/маршрутизацией · `rewrite` - переписывается
+как новый сервис · `split` - расщепляется · `move` - переезжает с минимальными правками ·
+`new` - в коде нет, создаётся · `retire` - временно живёт, затем выводится.
+
+| As-Is (что есть / где) | To-Be (куда) | Тип |
+|---|---|---|
+| REST API + маршруты монолита ([main.go](apps/smart_home/main.go)) | API Gateway + доменные сервисы | replace (фасад) |
+| Sensor CRUD ([handlers/sensors.go](apps/smart_home/handlers/sensors.go)) + таблица `sensors` ([init.sql](apps/smart_home/init.sql)) | Device Management + `devices` | rewrite + миграция данных |
+| Поля `value/status/last_updated`, отдача показаний | Telemetry + `telemetry_data` | rewrite |
+| `TemperatureService` - pull HTTP-клиент ([temperature_service.go](apps/smart_home/services/temperature_service.go)) | Poller-адаптер в Connectivity Gateway | move/reshape |
+| `temperature-api` - стаб (Task 5, [docker-compose.yml](apps/docker-compose.yml)) | остаётся как legacy pull-источник, таргет поллера | keep -> retire |
+| Одна БД PostgreSQL | БД-на-сервис + TimescaleDB для телеметрии | split |
+| Аутентификация (в коде нет) | Identity | new |
+| Свет / ворота / наблюдение / сценарии (в описании есть, в коде нет) | Control + Observation + Scenario | new |
+
+Два шва перехода:
+
+- **South (данные).** `TemperatureService -> temperature-api` (синхронный pull inline) превращается
+  в `Connectivity Gateway (поллер) -> temperature-api -> Event Bus -> Telemetry`. Здесь же чинится
+  N+1 из `GetSensors`.
+- **North (клиенты).** Закрывается фасадом на API Gateway: трафик клиентов сначала идёт в монолит,
+  затем по мере готовности сервисов переключается на новые - контракт клиента остаётся стабильным.
+  Монолит при этом не правится, а «усыхает» эндпоинт за эндпоинтом (strangler).
+
+### 7. План перехода (фазы) - strangler
+
+Переход выполняется итеративно. Инвариант: на каждой фазе клиентский контракт стабилен.
+
+| Фаза | Состояние | Клиент видит |
+|---|---|---|
+| 0 (as-is) | клиент -> монолит -> temperature-api (pull inline, N+1) | - |
+| 1 (фасад + инфра) | API GW перед монолитом (100% трафика -> монолит). Подняты Event Bus + Connectivity GW (поллер) + Telemetry. Поллер опрашивает temperature-api -> шина -> Telemetry (**shadow**, параллельно) | без изменений |
+| 2 (срезаем чтение) | GW роутит `GET /sensors` -> Telemetry / Device Management. Монолит больше не делает inline-pull -> **N+1 устранён** | без изменений |
+| 3 (срезаем запись) | GW роутит CRUD -> Device Management. Одноразовая миграция данных `sensors` -> `devices` | без изменений |
+| 4 (вывод) | Монолит удалён. temperature-api живёт, пока его не заменят реальные MQTT-устройства -> затем гасится поллер-адаптер | без изменений |
+
+**Диаграммы переходного периода:**
+
+- [transition_containers.puml](docs/c4/transition_containers.puml) - сосуществование монолита и новых сервисов за фасадом API Gateway.
+- [transition_sequence.puml](docs/c4/transition_sequence.puml) - обслуживание `GET /sensors` в overlap (до и после миграции пути) + shadow-поток поллера.
+
 
 # Задание 2. Проектирование микросервисной архитектуры
 
@@ -86,16 +132,42 @@
 - Device Management: [c4_components_device_mgmt.puml](docs/c4/components_device_mgmt.puml) - реестр устройств + profile/capability registry.
 - Control: [c4_components_control.puml](docs/c4/components_control.puml) - generic north-bound: резолв профиля, desired/reported state, диспетчеризация в шину.
 - Scenario/Automation: [c4_components_scenario.puml](docs/c4/components_scenario.puml) - подписка на телеметрию (хореография) + локальная оркестрация команд.
+- Device Connectivity Gateway: [c4_components_conngw.puml](docs/c4/components_conngw.puml) - south-bound: MQTT-адаптер + HTTP-push-адаптер + **Poller/Scheduler** -> общий Normalizer/Dedup -> Bus Publisher. Поллер - наследник `TemperatureService`, точка интеграции pull-устройств и legacy `temperature-api`.
 
-Остальные сервисы (Identity, Telemetry, Наблюдение, Connectivity Gateway) следуют тому же паттерну: API → доменная логика → repository/(de)сериализация шины.
+Остальные сервисы (Identity, Telemetry, Наблюдение) следуют тому же паттерну: API -> доменная логика -> repository/(de)сериализация шины.
 
 **Диаграмма кода (Code)**
 
-[c4_code_command_sequence.puml](docs/c4/code_command_sequence.puml) - sequence самого критичного потока: реактивный сценарий «влажность → вентиляция» (south-bound телеметрия → хореография-триггер → оркестрация команды → доставка через адаптер → reported state).
+[c4_code_command_sequence.puml](docs/c4/code_command_sequence.puml) - sequence самого критичного потока: реактивный сценарий «влажность -> вентиляция» (south-bound телеметрия -> хореография-триггер -> оркестрация команды -> доставка через адаптер -> reported state).
 
 # Задание 3. Разработка ER-диаграммы
 
-Добавьте сюда ER-диаграмму. Она должна отражать ключевые сущности системы, их атрибуты и тип связей между ними.
+[er_warmhouse.puml](docs/er/er_warmhouse.puml) - логическая модель данных To-Be системы.
+
+**Ключевое решение - схема per-service, а не единая БД.** Архитектура из Задания 2 использует
+БД-на-сервис, поэтому ER-диаграмма разбита по сервисам (каждая БД - отдельный `package`), а не
+сведена в одну плоскую схему. Из этого следуют два типа связей:
+
+- **── solid** - физический внешний ключ внутри одной БД сервиса.
+- **·· dashed (LOGICAL FK)** - логическая ссылка на сущность *другого* сервиса. Физического FK
+  нет (базы разные); целостность держится в приложении / на bind-time (см. Binding Validator в
+  `components_scenario.puml`). Ключи - `UUID`, чтобы не было коллизий между сервисами.
+
+**Сущности по сервисам:**
+
+| Сервис (БД) | Сущности | Назначение |
+|---|---|---|
+| Identity (PostgreSQL) | `users`, `houses` | Аккаунты и владение. Дом принадлежит одному владельцу (1:N). |
+| Device Management (PostgreSQL) | `device_types`, `device_profiles`, `rooms`, `devices` | Реестр устройств. `device_profiles` (vendor/model + `capabilities` JSONB) - механизм подключения ещё неизвестных приборов: новый прибор = новый профиль-данные, без изменения кода. |
+| Telemetry (TimescaleDB) | `telemetry_data` | Time-series показаний, hypertable, без FK. |
+| Control (PostgreSQL) | `device_state`, `commands` | desired/reported state (1:1 с устройством) и журнал команд. |
+| Scenario (PostgreSQL) | `scenarios`, `rule_conditions`, `rule_actions` | Пользовательские правила: триггер -> условия -> действия (реактивный поток «телеметрия -> команда»). |
+| Observation (PostgreSQL) | `cameras` | Метаданные камер удалённого наблюдения. |
+
+**Основные связи:** User 1-N House · House 1-N Room/Device · DeviceType/DeviceProfile 1-N Device ·
+Device 1-1 DeviceState · Device 1-N Command/TelemetryData · Scenario 1-N Condition/Action.
+Сущности `Module` из примера задания в модели нет намеренно: его роль («подключение неизвестных
+устройств») в этой архитектуре играют `device_profiles`/`capabilities`, а не отдельная таблица.
 
 # Задание 4. Создание и документирование API
 
