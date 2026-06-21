@@ -1,0 +1,58 @@
+@startuml transition_containers
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title C4 Containers (Transition / overlap) - strangler: монолит и новые сервисы сосуществуют
+
+Person(user, "Пользователь / клиенты", "Фронт, Postman - контракт не меняется")
+
+System_Boundary(sb, "Тёплый дом (переходный период)") {
+
+  Container(apigw, "API Gateway", "Go/Envoy", "Фасад strangler: роутит путь за путём - легаси или новый сервис")
+
+  ' --- легаси (усыхает) ---
+  Container(monolith, "Smart Home (монолит, legacy)", "Go", "Усыхает: эндпоинты переключаются на новые сервисы по мере готовности")
+  ContainerDb(mono_db, "sensors DB", "PostgreSQL", "Старая единая таблица sensors. Мигрирует в Device DB")
+  Container(tempapi, "temperature-api", "любой", "Legacy pull-источник (стаб). Выводится после замены на реальные устройства")
+
+  ' --- новые сервисы ---
+  Container(devmgmt, "Device Management", "Go", "Новый реестр устройств")
+  ContainerDb(devmgmt_db, "Device DB", "PostgreSQL", "Устройства, профили")
+  Container(telemetry, "Telemetry", "Go", "Новое хранилище показаний")
+  ContainerDb(telemetry_db, "Telemetry DB", "TimescaleDB", "Time-series")
+  Container(conngw, "Device Connectivity Gateway", "Go", "Поллер - наследник TemperatureService")
+  ContainerQueue(bus, "Event Bus", "Kafka", "Телеметрия, события")
+}
+
+' --- north: фасад ---
+Rel(user, apigw, "Использует (неизменный контракт)", "HTTPS/REST")
+Rel(apigw, monolith, "Ещё НЕ мигрированные пути", "REST")
+Rel(apigw, devmgmt, "Мигрированные пути: устройства", "REST")
+Rel(apigw, telemetry, "Мигрированные пути: показания", "REST")
+
+' --- легаси internals ---
+Rel(monolith, mono_db, "Читает/пишет", "SQL")
+
+' --- миграция данных ---
+Rel(monolith, devmgmt, "Одноразовая миграция sensors -> devices", "ETL/скрипт")
+
+' --- south: поллер вместо inline-pull ---
+Rel(conngw, tempapi, "Опрашивает по таймеру (pull)", "HTTP")
+Rel(conngw, bus, "publish TelemetryReceived", "events")
+Rel(bus, telemetry, "TelemetryReceived", "events")
+Rel(telemetry, telemetry_db, "Читает/пишет", "SQL")
+Rel(devmgmt, devmgmt_db, "Читает/пишет", "SQL")
+
+note right of apigw
+  Инвариант: на каждой фазе клиентский контракт
+  стабилен. Монолит НЕ правится - пути переключает
+  фасад (фазы 0->4 описаны в README, раздел 7).
+end note
+
+note bottom of tempapi
+  South-шов: раньше монолит делал pull inline
+  (N+1 в GetSensors). Теперь conngw-поллер
+  опрашивает temperature-api и льёт в шину ->
+  Telemetry. Монолит из этого потока выпадает.
+end note
+
+@enduml

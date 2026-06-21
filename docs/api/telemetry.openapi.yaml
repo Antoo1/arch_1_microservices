@@ -1,0 +1,205 @@
+openapi: 3.0.3
+info:
+  title: Telemetry API - «Тёплый дом»
+  version: 1.0.0
+  description: |
+    Чтение time-series показаний сенсоров. Сервис-владелец: **Telemetry** (TimescaleDB,
+    ER - hypertable `telemetry_data`).
+    Запись телеметрии идёт только асинхронно через `telemetry.received` (event-bus.asyncapi.yaml);
+    REST используется исключительно для чтения.
+    Аутентификация: Bearer JWT (Identity), проверяется на API Gateway.
+servers:
+  - url: https://api.warmhouse.example/v1
+    description: API Gateway (синхронный клиентский API)
+security:
+  - bearerAuth: []
+tags:
+  - name: Telemetry
+    description: Чтение показаний
+paths:
+  /devices/{deviceId}/telemetry:
+    get:
+      tags: [Telemetry]
+      summary: Получить показания устройства
+      operationId: queryTelemetry
+      description: |
+        Возвращает страницу показаний устройства с фильтрами по метрике и временному диапазону.
+        Пагинация курсорная (`next_cursor`).
+      parameters:
+        - name: deviceId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: metric
+          in: query
+          description: Фильтр по метрике (например, humidity, temperature)
+          schema:
+            type: string
+        - name: from
+          in: query
+          description: Начало диапазона (ISO 8601, включительно)
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: Конец диапазона (ISO 8601, исключительно)
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+        - name: order
+          in: query
+          description: Порядок по ts
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+        - name: cursor
+          in: query
+          description: Курсор пагинации из next_cursor предыдущего ответа
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Страница показаний
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TelemetryPage'
+              examples:
+                humidity:
+                  value:
+                    device_id: 6ba7b810-9dad-11d1-80b4-00c04fd430c8
+                    items:
+                      - ts: '2026-06-20T10:19:00Z'
+                        metric: humidity
+                        value: 72.5
+                        unit: '%'
+                        quality: 0
+                      - ts: '2026-06-20T10:18:00Z'
+                        metric: humidity
+                        value: 71.0
+                        unit: '%'
+                        quality: 0
+                    next_cursor: eyJ0cyI6IjIwMjYtMDYtMjBUMTA6MTg6MDBaIn0=
+        '400':
+          description: Некорректные параметры запроса (например, from > to или limit вне диапазона)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                range:
+                  value:
+                    error:
+                      code: validation_error
+                      message: "'from' must be before 'to'"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  responses:
+    Unauthorized:
+      description: Отсутствует или невалиден Bearer-токен
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            unauth:
+              value:
+                error:
+                  code: unauthorized
+                  message: Missing or invalid bearer token
+    NotFound:
+      description: Устройство не найдено или не принадлежит владельцу
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            nf:
+              value:
+                error:
+                  code: not_found
+                  message: Device not found
+    ServerError:
+      description: Внутренняя ошибка сервера
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            err:
+              value:
+                error:
+                  code: internal_error
+                  message: Unexpected error
+  schemas:
+    TelemetryPoint:
+      type: object
+      required: [ts, metric, value]
+      properties:
+        ts:
+          type: string
+          format: date-time
+        metric:
+          type: string
+        value:
+          type: number
+          format: double
+        unit:
+          type: string
+          nullable: true
+        quality:
+          type: integer
+          description: Признак качества показания (0 = good)
+          nullable: true
+    TelemetryPage:
+      type: object
+      required: [device_id, items]
+      properties:
+        device_id:
+          type: string
+          format: uuid
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/TelemetryPoint'
+        next_cursor:
+          type: string
+          nullable: true
+          description: Курсор для следующей страницы; null - данных больше нет
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true
+              nullable: true

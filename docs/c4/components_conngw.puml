@@ -1,0 +1,50 @@
+@startuml components_conngw
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+title C4 Components - Device Connectivity Gateway (south-bound)
+
+System_Ext(device, "Устройства партнёров", "Push: MQTT / HTTP. Pull-only: HTTP/CoAP")
+System_Ext(tempapi, "temperature-api", "Legacy pull-источник (стаб). Опрашивается по таймеру; выводится после миграции")
+Container(mqtt, "MQTT Broker", "EMQX", "Сессии устройств, топики, QoS, LWT")
+ContainerQueue(bus, "Event Bus", "Kafka", "Телеметрия, команды, presence")
+
+Container_Boundary(conngw, "Device Connectivity Gateway") {
+  Component(mqttad, "MQTT Adapter", "Go", "MQTT-клиент брокера: sub телеметрии/ack, pub команд")
+  Component(pushad, "HTTP-Push Adapter", "Go", "Принимает push от HTTP/CoAP устройств (минуя брокер)")
+  Component(poller, "Poller / Scheduler", "Go", "Опрашивает pull-only устройства по таймеру: интервал+jitter на устройство, backoff при ошибке, presence по N неудачам")
+  Component(norm, "Normalizer", "Go", "Приводит payload разных протоколов к каноническому конверту телеметрии (без семантики профиля - conngw не зависит от DM)")
+  Component(dedup, "Dedup / Idempotency", "Go", "Отсев дублей по (device_id, msg_id): QoS1 = at-least-once")
+  Component(pub, "Bus Publisher", "Go", "Публикует TelemetryReceived / presence в шину")
+  Component(cmd, "Command Consumer", "Go", "Подписан на DeviceCommand из шины, маршрутизирует готовый payload в нужный адаптер")
+}
+
+' --- inbound телеметрия: push ---
+Rel(device, mqtt, "Pub телеметрии", "MQTT/TLS")
+Rel(mqttad, mqtt, "Sub телеметрии/ack", "MQTT")
+Rel(device, pushad, "Push показаний", "HTTP/CoAP")
+
+' --- inbound телеметрия: pull ---
+Rel(poller, device, "Опрашивает pull-only по таймеру", "HTTP/CoAP")
+Rel(poller, tempapi, "GET /temperature (по таймеру)", "HTTP")
+
+' --- общий конвейер нормализации ---
+Rel(mqttad, norm, "raw payload")
+Rel(pushad, norm, "raw payload")
+Rel(poller, norm, "raw payload")
+Rel(norm, dedup, "канонический конверт")
+Rel(dedup, pub, "уникальные показания")
+Rel(pub, bus, "Публикует телеметрию/presence", "events")
+
+' --- outbound команды ---
+Rel(cmd, bus, "Подписан на DeviceCommand", "events")
+Rel(cmd, mqttad, "Готовый payload -> устройству")
+Rel(mqttad, mqtt, "Pub команд", "MQTT")
+
+note right of poller
+  Поллер - технический мост As-Is->To-Be:
+  наследник TemperatureService из монолита.
+  Чинит N+1: опрос вынесен из запроса GetSensors
+  в фоновый таймер, результат идёт в шину.
+end note
+
+@enduml

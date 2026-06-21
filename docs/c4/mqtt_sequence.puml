@@ -1,0 +1,84 @@
+@startuml mqtt_sequence
+title MQTT - механика South-bound (сессия, QoS, retained, LWT, app-level ack)
+
+actor "Устройство\n(сенсор + исполнитель)" as dev
+participant "MQTT Broker\n(EMQX)" as br
+participant "Connectivity GW\n(MQTT-клиент)" as gw
+queue "Event Bus\n(Kafka)" as bus
+participant "Telemetry" as tel
+participant "Control" as ctl
+participant "Device Mgmt" as dm
+
+== Установка сессии ==
+dev -> br : CONNECT (clientId, TLS/mTLS, cleanSession=false)
+note right of dev
+  LWT задаётся в CONNECT:
+  topic = warmhouse/{home}/{dev}/status
+  payload = "offline", retained=true
+end note
+br --> dev : CONNACK (sessionPresent)
+gw -> br : SUBSCRIBE warmhouse/+/+/telemetry/# (QoS1)
+gw -> br : SUBSCRIBE warmhouse/+/+/command/+/ack (QoS1)
+dev -> br : PUBLISH .../status "online" (retained=true)
+
+== Телеметрия: push (QoS 1) ==
+dev -> br : PUBLISH .../telemetry/temp {t:21.5} QoS1
+br --> dev : PUBACK
+br -> gw : PUBLISH .../telemetry/temp (QoS1)
+gw --> br : PUBACK
+note over gw
+  QoS1 = at least once -> возможны дубли.
+  GW дедуплицирует по (device_id, msg_id)
+  перед публикацией в Kafka (идемпотентность)
+end note
+gw -> bus : publish TelemetryReceived (нормализованный)
+bus -> tel : TelemetryReceived
+tel -> tel : сохранить time-series
+
+== Команда: desired state -> устройство ==
+ctl -> ctl : записать desired, статус cmd_id = PENDING + старт timeout
+ctl -> bus : publish DeviceCommand(heater, on, cmd_id)
+bus -> gw : DeviceCommand (подписка)
+gw -> br : PUBLISH .../command/heater {on, cmd_id} QoS1
+br --> gw : PUBACK
+br -> dev : PUBLISH .../command/heater (QoS1)
+dev --> br : PUBACK
+note right of dev
+  PUBACK = доставлено ДО устройства,
+  НЕ выполнено. Нужен app-level ack ниже.
+end note
+
+== Application-level ack: reported state ==
+alt устройство ответило (happy path)
+  dev -> dev : выполнить команду (включить нагрев)
+  dev -> br : PUBLISH .../command/heater/ack {cmd_id, ok} QoS1
+  br --> dev : PUBACK
+  br -> gw : PUBLISH .../command/heater/ack (QoS1)
+  gw -> bus : publish CommandAck(cmd_id, ok)
+  bus -> ctl : CommandAck (корреляция по cmd_id)
+  ctl -> ctl : desired == reported -> cmd_id = SYNCED
+else ack не пришёл за N сек (timeout)
+  ctl -> ctl : cmd_id = FAILED/TIMEOUT (реконсиляция)
+  note right of ctl
+    PUBACK ≠ исполнение. Без app-level ack
+    Control не знает, выполнил ли утюг команду.
+    Прямая связь не помогла бы - устройство
+    может быть offline. Спасает только
+    cmd_id-корреляция + таймаут.
+  end note
+end
+
+== Обрыв связи: LWT ==
+dev -x br : TCP разрыв (нет DISCONNECT)
+br -> br : keep-alive timeout
+br -> gw : PUBLISH .../status "offline" (LWT, retained)
+gw -> bus : publish DeviceOffline
+bus -> dm : DeviceOffline (presence-подписка)
+dm -> dm : online=false, last_seen=now (НЕ трогает ownership)
+note over br, dm
+  Retained "offline" отдаётся новому подписчику сразу.
+  DM обновляет presence, но identity/ownership
+  по-прежнему только user-initiated через API GW.
+end note
+
+@enduml

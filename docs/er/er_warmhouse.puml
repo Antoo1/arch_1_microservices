@@ -1,0 +1,278 @@
+@startuml er_warmhouse
+title ER-диаграмма (логическая модель) - экосистема «Тёплый дом» (To-Be, per-service DB)
+
+hide circle
+skinparam linetype ortho
+skinparam roundcorner 8
+skinparam shadowing false
+skinparam package {
+  BackgroundColor<<DB>> #F7FBFF
+  BorderColor<<DB>> #4682B4
+  FontStyle bold
+}
+skinparam entity {
+  BackgroundColor #FFFFFF
+  BorderColor #4682B4
+  BackgroundColor<<stub>> #F0F0F0
+  BorderColor<<stub>> #9E9E9E
+}
+
+' =====================================================================
+' Условные обозначения:
+'   *attr            - NOT NULL
+'   <<PK>> <<FK>>    - первичный / внешний ключ
+'   <<UQ>>           - уникальный
+'   <<LOGICAL FK>>   - логическая ссылка на сущность ДРУГОГО сервиса.
+'                      Физического FK НЕТ (база у каждого сервиса своя),
+'                      целостность держится в приложении / на bind-time.
+'   ──  (solid)      - физический FK внутри одной БД сервиса
+'   ··  (dashed)     - логическая cross-service ссылка (без FK)
+' =====================================================================
+
+' #####################################################################
+' # IDENTITY DB (PostgreSQL) - аккаунты (профzиль + auth-заглушка) и владение
+' #####################################################################
+package "Identity DB (PostgreSQL)" <<DB>> {
+
+  entity "users" as users {
+    * id : UUID <<PK>>
+    --
+    * email : VARCHAR(255) <<UQ>>
+    full_name : VARCHAR(150)
+    phone : VARCHAR(32)
+    * status : VARCHAR(20)
+    * created_at : TIMESTAMPTZ
+    updated_at : TIMESTAMPTZ
+  }
+
+
+  entity "user_auth" as user_auth <<stub>> {
+    * user_id : UUID <<PK>> <<FK users>>
+    --
+    ' creds / MFA / tokens / sessions - намеренно не детализируем
+  }
+  note bottom of user_auth
+    Заглушка (stub). Принадлежит Identity DB.
+    TODO: проработать схему аутентификации
+    (пароли, MFA, токены, сессии) - вне scope этой модели.
+  end note
+
+  entity "houses" as houses {
+    * id : UUID <<PK>>
+    --
+    * owner_id : UUID <<FK users>>
+    * name : VARCHAR(150)
+    address : VARCHAR(255)
+    timezone : VARCHAR(64)
+    * created_at : TIMESTAMPTZ
+  }
+}
+
+' #####################################################################
+' # DEVICE MANAGEMENT DB (PostgreSQL) - реестр устройств, типы, профили
+' #####################################################################
+package "Device Management DB (PostgreSQL)" <<DB>> {
+
+  entity "device_types" as device_types {
+    * id : UUID <<PK>>
+    --
+    * code : VARCHAR(50) <<UQ>>
+    * name : VARCHAR(100)
+    * category : VARCHAR(20)
+    default_unit : VARCHAR(20)
+  }
+
+  entity "device_profiles" as device_profiles {
+    * id : UUID <<PK>>
+    --
+    * type_id : UUID <<FK device_types>>
+    * vendor : VARCHAR(100)
+    * model : VARCHAR(100)
+    * protocol : VARCHAR(20)
+    * capabilities : JSONB
+    payload_mapping : JSONB
+    * version : VARCHAR(20)
+    * created_at : TIMESTAMPTZ
+  }
+
+  entity "rooms" as rooms {
+    * id : UUID <<PK>>
+    --
+    * house_id : UUID <<LOGICAL FK houses>>
+    * name : VARCHAR(100)
+  }
+
+  entity "devices" as devices {
+    * id : UUID <<PK>>
+    --
+    * house_id : UUID <<LOGICAL FK houses>>
+    room_id : UUID <<FK rooms>>
+    * type_id : UUID <<FK device_types>>
+    * profile_id : UUID <<FK device_profiles>>
+    * serial_number : VARCHAR(100) <<UQ>>
+    * name : VARCHAR(150)
+    * status : VARCHAR(20)
+    paired_at : TIMESTAMPTZ
+    * created_at : TIMESTAMPTZ
+  }
+
+  entity "device_credentials" as device_credentials <<stub>> {
+    * device_id : UUID <<PK>> <<FK devices>>
+    --
+    ' mTLS-cert / secret / rotation - намеренно не детализируем
+  }
+  note bottom of device_credentials
+    Заглушка (stub). 
+    Идентичность устройства: по этим кредам устройство 
+    аутентифицируется у нас (MQTT-сессия, целостность телеметрии, 
+    авторизация команд, pairing; видео - частный случай)
+    TODO: проработать схему креденшелов - вне scope этой модели.
+  end note
+}
+
+' #####################################################################
+' # TELEMETRY DB (TimescaleDB) - показания сенсоров (time-series)
+' #####################################################################
+package "Telemetry DB (TimescaleDB)" <<DB>> {
+
+  entity "telemetry_data" as telemetry_data {
+    * device_id : UUID <<LOGICAL FK devices>>
+    * ts : TIMESTAMPTZ <<PK part>>
+    --
+    * metric : VARCHAR(50) <<PK part>>
+    * value : DOUBLE
+    unit : VARCHAR(20)
+    quality : SMALLINT
+  }
+  note bottom of telemetry_data
+    Hypertable: партиционирование по ts.
+    Без FK - ссылка на devices логическая.
+    PK = (device_id, metric, ts).
+  end note
+}
+
+' #####################################################################
+' # CONTROL DB (PostgreSQL) - desired/reported state и команды
+' #####################################################################
+package "Control DB (PostgreSQL)" <<DB>> {
+
+  entity "device_state" as device_state {
+    * device_id : UUID <<PK>> <<LOGICAL FK devices>>
+    --
+    desired_state : JSONB
+    reported_state : JSONB
+    * desired_version : BIGINT
+    * reported_version : BIGINT
+    last_reported_at : TIMESTAMPTZ
+    * updated_at : TIMESTAMPTZ
+  }
+
+  entity "commands" as commands {
+    * id : UUID <<PK>>
+    --
+    * device_id : UUID <<LOGICAL FK devices>>
+    issued_by_user_id : UUID <<LOGICAL FK users>>
+    scenario_id : UUID <<LOGICAL FK scenarios>>
+    * payload : JSONB
+    * status : VARCHAR(20)
+    * issued_at : TIMESTAMPTZ
+    acked_at : TIMESTAMPTZ
+  }
+}
+
+' #####################################################################
+' # SCENARIO DB (PostgreSQL) - пользовательские правила и сценарии
+' #####################################################################
+package "Scenario DB (PostgreSQL)" <<DB>> {
+
+  entity "scenarios" as scenarios {
+    * id : UUID <<PK>>
+    --
+    * house_id : UUID <<LOGICAL FK houses>>
+    * owner_user_id : UUID <<LOGICAL FK users>>
+    * name : VARCHAR(150)
+    description : VARCHAR(500)
+    * enabled : BOOLEAN
+    ' ALL = AND, ANY = OR - режим объединения rule_conditions
+    * condition_logic : VARCHAR(3)
+    * trigger_type : VARCHAR(20)
+    trigger_spec : JSONB
+    * created_at : TIMESTAMPTZ
+    updated_at : TIMESTAMPTZ
+  }
+
+  entity "rule_conditions" as rule_conditions {
+    * id : UUID <<PK>>
+    --
+    * scenario_id : UUID <<FK scenarios>>
+    * source_device_id : UUID <<LOGICAL FK devices>>
+    * metric : VARCHAR(50)
+    * operator : VARCHAR(10)
+    * threshold : DOUBLE
+    ' гистерезис/дебаунс: условие держится N сек, NULL = мгновенно
+    for_duration_s : INT
+  }
+
+  entity "rule_actions" as rule_actions {
+    * id : UUID <<PK>>
+    --
+    * scenario_id : UUID <<FK scenarios>>
+    * order_no : SMALLINT
+    * target_device_id : UUID <<LOGICAL FK devices>>
+    * command_template : JSONB
+  }
+}
+
+' #####################################################################
+' # OBSERVATION DB (PostgreSQL) - метаданные камер наблюдения
+' #####################################################################
+package "Observation DB (PostgreSQL)" <<DB>> {
+
+  entity "cameras" as cameras {
+    * id : UUID <<PK>>
+    --
+    * device_id : UUID <<LOGICAL FK devices>>
+    * house_id : UUID <<LOGICAL FK houses>>
+    * source_uri : VARCHAR(255)
+    * stream_protocol : VARCHAR(10)
+    codec : VARCHAR(20)
+    resolution : VARCHAR(20)
+    * status : VARCHAR(20)
+    * created_at : TIMESTAMPTZ
+  }
+}
+
+' =====================================================================
+' СВЯЗИ ВНУТРИ СЕРВИСА (физические FK, solid)
+' =====================================================================
+users          ||--|| user_auth       : "креды (1:1, schema TBD)"
+users          ||--o{ houses          : "владеет (1:N)"
+device_types   ||--o{ device_profiles  : "имеет профили (1:N)"
+device_types   ||--o{ devices          : "классифицирует (1:N)"
+device_profiles ||--o{ devices         : "описывает (1:N)"
+rooms          ||--o{ devices          : "размещает (1:N)"
+devices        ||--|| device_credentials : "креды устройства (1:1, schema TBD)"
+scenarios      ||--|{ rule_conditions  : "условия (1:N)"
+scenarios      ||--|{ rule_actions     : "действия (1:N)"
+
+' =====================================================================
+' ЛОГИЧЕСКИЕ CROSS-SERVICE ССЫЛКИ (dashed, без физического FK)
+' =====================================================================
+houses        ||..o{ rooms             : "logical"
+houses        ||..o{ devices           : "logical"
+devices       ||..|| device_state      : "logical (1:1)"
+devices       ||..o{ commands          : "logical"
+devices       ||..o{ telemetry_data    : "logical"
+devices       ||..o{ rule_conditions   : "logical (source)"
+devices       ||..o{ rule_actions      : "logical (target)"
+devices       ||..o| cameras           : "logical (1:1)"
+houses        ||..o{ scenarios         : "logical"
+
+legend right
+  == Обозначения ==
+  ── solid  : физический FK внутри одной БД сервиса
+  ·· dashed : логическая cross-service ссылка (без FK, целостность в приложении)
+  Ключи UUID - глобально уникальны, без коллизий между сервисами.
+endlegend
+
+@enduml

@@ -1,0 +1,214 @@
+asyncapi: 3.0.0
+info:
+  title: Event Bus - «Тёплый дом»
+  version: 1.0.0
+  description: |
+    Асинхронный контракт шины (Kafka). Покрывает реактивный поток «влажность -> вентиляция»
+    (docs/c4/code_command_sequence.puml):
+    Connectivity GW публикует телеметрию -> Telemetry сохраняет, Scenario триггерит правило ->
+    Control публикует команду -> Connectivity GW доставляет железу и публикует подтверждение.
+
+    Документ описывает контракт **всей шины**, поэтому для каждого канала заданы операции с
+    обеих сторон: `action: send` (продюсер публикует) и `action: receive` (консьюмер получает).
+    `command_id` используется как `correlationId`, связывая `device.command` и `command.ack`
+    с REST `GET /commands/{commandId}` (control.openapi.yaml).
+defaultContentType: application/json
+servers:
+  eventbus:
+    host: kafka:9092
+    protocol: kafka
+    description: Kafka-брокер шины (хост иллюстративный - окружения ещё не определены)
+channels:
+  telemetryReceived:
+    address: telemetry.received
+    description: Нормализованное показание сенсора.
+    messages:
+      telemetryReceived:
+        $ref: '#/components/messages/TelemetryReceived'
+  deviceCommand:
+    address: device.command
+    description: Команда устройству, готовая к доставке (после резолва профиля в Control).
+    messages:
+      deviceCommand:
+        $ref: '#/components/messages/DeviceCommand'
+  commandAck:
+    address: command.ack
+    description: Подтверждение доставки/исполнения команды и reported state.
+    messages:
+      commandAck:
+        $ref: '#/components/messages/CommandAck'
+operations:
+  sendTelemetry:
+    action: send
+    channel:
+      $ref: '#/channels/telemetryReceived'
+    summary: Connectivity Gateway публикует показание сенсора
+    messages:
+      - $ref: '#/channels/telemetryReceived/messages/telemetryReceived'
+  receiveTelemetry:
+    action: receive
+    channel:
+      $ref: '#/channels/telemetryReceived'
+    summary: Telemetry (хранение) и Scenario (триггеры правил) получают показание
+    messages:
+      - $ref: '#/channels/telemetryReceived/messages/telemetryReceived'
+  sendDeviceCommand:
+    action: send
+    channel:
+      $ref: '#/channels/deviceCommand'
+    summary: Control публикует готовую к доставке команду
+    messages:
+      - $ref: '#/channels/deviceCommand/messages/deviceCommand'
+  receiveDeviceCommand:
+    action: receive
+    channel:
+      $ref: '#/channels/deviceCommand'
+    summary: Connectivity Gateway получает команду и доставляет её устройству
+    messages:
+      - $ref: '#/channels/deviceCommand/messages/deviceCommand'
+  sendCommandAck:
+    action: send
+    channel:
+      $ref: '#/channels/commandAck'
+    summary: Connectivity Gateway публикует подтверждение
+    messages:
+      - $ref: '#/channels/commandAck/messages/commandAck'
+  receiveCommandAck:
+    action: receive
+    channel:
+      $ref: '#/channels/commandAck'
+    summary: Control получает подтверждение и обновляет reported state
+    messages:
+      - $ref: '#/channels/commandAck/messages/commandAck'
+components:
+  messages:
+    TelemetryReceived:
+      name: TelemetryReceived
+      title: Показание сенсора
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/TelemetryReceivedPayload'
+      examples:
+        - name: humidity
+          summary: Показание влажности
+          payload:
+            device_id: 6ba7b810-9dad-11d1-80b4-00c04fd430c8
+            house_id: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+            ts: '2026-06-20T10:19:00Z'
+            metric: humidity
+            value: 72.5
+            unit: '%'
+            quality: 0
+    DeviceCommand:
+      name: DeviceCommand
+      title: Команда устройству (готовая к доставке)
+      contentType: application/json
+      correlationId:
+        location: $message.payload#/command_id
+      payload:
+        $ref: '#/components/schemas/DeviceCommandPayload'
+      examples:
+        - name: vent_on
+          summary: Включить вентилятор (протокольно-готовый payload)
+          payload:
+            command_id: 9f8e7d6c-3333-4444-8888-000000000010
+            device_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+            capability: set_state
+            protocol: mqtt
+            resolved_payload:
+              op: set
+              power: "on"
+              speed: 3
+            issued_at: '2026-06-20T10:20:00Z'
+    CommandAck:
+      name: CommandAck
+      title: Подтверждение команды
+      contentType: application/json
+      correlationId:
+        location: $message.payload#/command_id
+      payload:
+        $ref: '#/components/schemas/CommandAckPayload'
+      examples:
+        - name: acked
+          summary: Команда выполнена
+          payload:
+            command_id: 9f8e7d6c-3333-4444-8888-000000000010
+            device_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+            status: acked
+            reported_state:
+              power: "on"
+              speed: 3
+            acked_at: '2026-06-20T10:20:02Z'
+  schemas:
+    TelemetryReceivedPayload:
+      type: object
+      required: [device_id, ts, metric, value]
+      properties:
+        device_id:
+          type: string
+          format: uuid
+        house_id:
+          type: string
+          format: uuid
+        ts:
+          type: string
+          format: date-time
+        metric:
+          type: string
+        value:
+          type: number
+          format: double
+        unit:
+          type: string
+        quality:
+          type: integer
+          description: Признак качества показания (0 = good)
+    DeviceCommandPayload:
+      type: object
+      description: |
+        Готовая к доставке команда. Control уже разрешил профиль/capabilities у Device
+        Management и положил протокольный payload - Connectivity GW доставляет его как есть,
+        не обращаясь к DM.
+      required: [command_id, device_id, capability, resolved_payload, issued_at]
+      properties:
+        command_id:
+          type: string
+          format: uuid
+        device_id:
+          type: string
+          format: uuid
+        capability:
+          type: string
+          description: Исходная абстрактная capability (для трассировки)
+          example: set_state
+        protocol:
+          type: string
+          description: Транспорт, разрешённый из профиля устройства
+          example: mqtt
+        resolved_payload:
+          type: object
+          additionalProperties: true
+          description: Протокольно-готовый payload после маппинга профиля (payload_mapping)
+        issued_at:
+          type: string
+          format: date-time
+    CommandAckPayload:
+      type: object
+      required: [command_id, device_id, status, acked_at]
+      properties:
+        command_id:
+          type: string
+          format: uuid
+        device_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [acked, failed]
+        reported_state:
+          type: object
+          additionalProperties: true
+          nullable: true
+        acked_at:
+          type: string
+          format: date-time

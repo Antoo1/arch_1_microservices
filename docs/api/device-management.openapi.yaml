@@ -1,0 +1,328 @@
+openapi: 3.0.3
+info:
+  title: Device Management API - «Тёплый дом»
+  version: 1.0.0
+  description: |
+    Реестр устройств: регистрация прибора и привязка к дому/комнате/типу/профилю.
+    Сервис-владелец: **Device Management** (см. docs/c4/components_device_mgmt.puml,
+    docs/er/er_warmhouse.puml - таблица `devices`).
+    Аутентификация: Bearer JWT (выдаёт Identity), проверяется на API Gateway.
+servers:
+  - url: https://api.warmhouse.example/v1
+    description: API Gateway (синхронный клиентский API, единый вход для клиентов)
+security:
+  - bearerAuth: []
+tags:
+  - name: Devices
+    description: Управление устройствами
+paths:
+  /devices:
+    post:
+      tags: [Devices]
+      summary: Зарегистрировать устройство
+      description: |
+        Создаёт запись об устройстве и привязывает его к дому владельца.
+        `house_id` должен принадлежать аутентифицированному пользователю,
+        иначе возвращается 404 (существование чужих ресурсов не раскрывается).
+      operationId: registerDevice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceRegistration'
+            examples:
+              vent:
+                summary: Регистрация вентилятора
+                value:
+                  house_id: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+                  room_id: 1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed
+                  type_id: 2f1c8a90-1111-4a2b-9c3d-000000000001
+                  profile_id: 9a2b3c4d-2222-4e5f-8a1b-000000000002
+                  serial_number: VENT-AC-0007
+                  name: Вентилятор в ванной
+      responses:
+        '201':
+          description: Устройство зарегистрировано
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+              examples:
+                created:
+                  value:
+                    id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    house_id: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+                    room_id: 1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed
+                    type_id: 2f1c8a90-1111-4a2b-9c3d-000000000001
+                    profile_id: 9a2b3c4d-2222-4e5f-8a1b-000000000002
+                    serial_number: VENT-AC-0007
+                    name: Вентилятор в ванной
+                    status: registered
+                    paired_at: null
+                    created_at: '2026-06-20T10:15:30Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Дом, комната, тип или профиль не найдены / не принадлежат владельцу
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                house_not_found:
+                  value:
+                    error:
+                      code: not_found
+                      message: House not found
+        '409':
+          description: Устройство с таким serial_number уже зарегистрировано
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                dup:
+                  value:
+                    error:
+                      code: conflict
+                      message: serial_number already registered
+                      details:
+                        serial_number: VENT-AC-0007
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /devices/{deviceId}:
+    get:
+      tags: [Devices]
+      summary: Получить информацию об устройстве
+      operationId: getDevice
+      description: |
+        Возвращает устройство. С `?include=profile` встраивает профиль (capabilities и
+        payload_mapping) - этим эндпоинтом Control синхронно резолвит профиль перед
+        формированием команды (межсервисный вызов Control -> Device Management).
+      parameters:
+        - name: deviceId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: include
+          in: query
+          description: Встроить связанные сущности в ответ
+          schema:
+            type: string
+            enum: [profile]
+      responses:
+        '200':
+          description: Устройство (с профилем, если запрошен)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+              examples:
+                with_profile:
+                  summary: Ответ на ?include=profile (как его видит Control)
+                  value:
+                    id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    house_id: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+                    room_id: 1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed
+                    type_id: 2f1c8a90-1111-4a2b-9c3d-000000000001
+                    profile_id: 9a2b3c4d-2222-4e5f-8a1b-000000000002
+                    serial_number: VENT-AC-0007
+                    name: Вентилятор в ванной
+                    status: online
+                    paired_at: '2026-06-20T10:16:00Z'
+                    created_at: '2026-06-20T10:15:30Z'
+                    profile:
+                      id: 9a2b3c4d-2222-4e5f-8a1b-000000000002
+                      type_id: 2f1c8a90-1111-4a2b-9c3d-000000000001
+                      vendor: Acme
+                      model: AC-Vent-200
+                      protocol: mqtt
+                      capabilities:
+                        set_state:
+                          power: [on, off]
+                          speed:
+                            min: 0
+                            max: 5
+                      payload_mapping:
+                        set_state:
+                          op: set
+                          power: $power
+                          speed: $speed
+                      version: 1.2.0
+                      created_at: '2026-01-10T08:00:00Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  responses:
+    BadRequest:
+      description: Ошибка валидации запроса
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalid:
+              value:
+                error:
+                  code: validation_error
+                  message: name is required
+    Unauthorized:
+      description: Отсутствует или невалиден Bearer-токен
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            unauth:
+              value:
+                error:
+                  code: unauthorized
+                  message: Missing or invalid bearer token
+    NotFound:
+      description: Устройство не найдено или не принадлежит владельцу
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            nf:
+              value:
+                error:
+                  code: not_found
+                  message: Device not found
+    ServerError:
+      description: Внутренняя ошибка сервера
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            err:
+              value:
+                error:
+                  code: internal_error
+                  message: Unexpected error
+  schemas:
+    DeviceRegistration:
+      type: object
+      required: [house_id, type_id, profile_id, serial_number, name]
+      properties:
+        house_id:
+          type: string
+          format: uuid
+        room_id:
+          type: string
+          format: uuid
+          nullable: true
+        type_id:
+          type: string
+          format: uuid
+        profile_id:
+          type: string
+          format: uuid
+        serial_number:
+          type: string
+          maxLength: 100
+        name:
+          type: string
+          maxLength: 150
+    Device:
+      type: object
+      required: [id, house_id, type_id, profile_id, serial_number, name, status, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        house_id:
+          type: string
+          format: uuid
+        room_id:
+          type: string
+          format: uuid
+          nullable: true
+        type_id:
+          type: string
+          format: uuid
+        profile_id:
+          type: string
+          format: uuid
+        serial_number:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+          enum: [registered, online, offline, disabled]
+          description: Начальный статус после регистрации - registered
+        paired_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        profile:
+          description: Профиль устройства. Присутствует только при ?include=profile
+          allOf:
+            - $ref: '#/components/schemas/DeviceProfile'
+    DeviceProfile:
+      type: object
+      required: [id, type_id, vendor, model, protocol, capabilities, version]
+      properties:
+        id:
+          type: string
+          format: uuid
+        type_id:
+          type: string
+          format: uuid
+        vendor:
+          type: string
+        model:
+          type: string
+        protocol:
+          type: string
+          description: Транспорт устройства (mqtt/http/coap)
+        capabilities:
+          type: object
+          additionalProperties: true
+          description: Что устройство умеет - capability -> допустимые аргументы
+        payload_mapping:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: Маппинг абстрактной команды в протокольный payload
+        version:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true
+              nullable: true

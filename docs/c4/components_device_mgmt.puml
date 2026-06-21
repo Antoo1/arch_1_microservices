@@ -1,0 +1,31 @@
+@startuml components_device_mgmt
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+title C4 Components - Device Management
+
+Person(user, "Пользователь", "Через API Gateway")
+Container(control, "Control", "Go", "Резолвит профиль перед командой")
+ContainerDb(devmgmt_db, "Device DB", "PostgreSQL", "Устройства, типы, профили")
+ContainerQueue(bus, "Event Bus", "Kafka/RabbitMQ", "")
+
+Container_Boundary(devmgmt, "Device Management") {
+  Component(api, "REST API", "Go/gin", "Эндпоинты регистрации, конфигурации, чтения устройств")
+  Component(reg, "Device Registry", "Go", "Идентичность устройств, привязка к владельцу, статус")
+  Component(profiles, "Profile / Capability Registry", "Go", "Декларативные профили: какие методы/capabilities у модели, маппинг payload. Новый прибор = новый профиль (данные)")
+  Component(pairing, "Pairing / Onboarding", "Go", "Подключение устройства, валидация, привязка к дому")
+  Component(repo, "Repository", "Go/pgx", "Доступ к Device DB")
+  Component(publisher, "Event Publisher", "Go", "Публикует события о регистрации/изменении устройств")
+}
+
+Rel(user, api, "Регистрирует и настраивает устройства", "REST")
+Rel(api, reg, "Использует")
+Rel(api, pairing, "Использует")
+Rel(reg, repo, "Читает/пишет")
+Rel(profiles, repo, "Читает/пишет")
+Rel(pairing, reg, "Создаёт запись устройства")
+Rel(repo, devmgmt_db, "SQL")
+Rel(reg, publisher, "Событие об изменении")
+Rel(publisher, bus, "Публикует", "events")
+Rel(control, api, "Запрашивает профиль/capabilities устройства", "REST")
+
+@enduml

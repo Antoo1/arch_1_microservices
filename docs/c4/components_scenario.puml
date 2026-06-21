@@ -1,0 +1,36 @@
+@startuml components_scenario
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+title C4 Components - Scenario / Automation
+
+Person(user, "Пользователь", "Создаёт правила через API Gateway")
+Container(control, "Control", "Go", "Исполняет команды")
+Container(devmgmt, "Device Management", "Go", "Каталог устройств/capabilities - источник истины о фактах")
+ContainerDb(scenario_db, "Scenario DB", "PostgreSQL", "Правила и сценарии")
+ContainerQueue(bus, "Event Bus", "Kafka/RabbitMQ", "Телеметрия + lifecycle устройств")
+
+Container_Boundary(scenario, "Scenario / Automation") {
+  Component(api, "Rules API", "Go/gin", "CRUD пользовательских правил и сценариев")
+  Component(consumer, "Telemetry Consumer", "Go", "Подписан на события телеметрии (хореография)")
+  Component(engine, "Rule Engine", "Go", "Сопоставляет события с условиями правил")
+  Component(orchestrator, "Action Orchestrator", "Go", "Локальная оркестрация: вызывает команды Control в нужном порядке")
+  Component(binding, "Binding Validator", "Go", "Целостность связок правило->устройство: bind-time резолв каталога/валидация + инвалидация при удалении/смене владельца")
+  Component(repo, "Repository", "Go/pgx", "Доступ к Scenario DB")
+}
+
+Rel(user, api, "Настраивает правила", "REST")
+Rel(api, repo, "Читает/пишет")
+Rel(repo, scenario_db, "SQL")
+Rel(consumer, bus, "Подписан на телеметрию", "events")
+Rel(consumer, engine, "Передаёт событие")
+Rel(engine, repo, "Загружает правила")
+Rel(engine, orchestrator, "Условие сработало -> действия")
+Rel(orchestrator, control, "Команды устройствам", "REST")
+
+' --- Целостность связок правило->устройство ---
+Rel(api, binding, "Проверить ссылки/capability при create/update")
+Rel(binding, devmgmt, "Каталог + capabilities + проверка владения (bind-time)", "REST")
+Rel(binding, bus, "Подписан на DeviceRemoved/OwnershipChanged", "events")
+Rel(binding, repo, "Дизейблит/помечает протухшие правила")
+
+@enduml

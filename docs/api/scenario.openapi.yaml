@@ -1,0 +1,302 @@
+openapi: 3.0.3
+info:
+  title: Scenario / Automation API - «Тёплый дом»
+  version: 1.0.0
+  description: |
+    Пользовательские правила: триггер -> условия -> действия (реактивный поток «телеметрия -> команда»).
+    Сервис-владелец: **Scenario** (docs/c4/components_scenario.puml; ER - `scenarios`,
+    `rule_conditions`, `rule_actions`).
+
+    При создании выполняется bind-time валидация ссылок на устройства (Binding Validator):
+    несуществующее или чужое устройство в условии/действии -> `422`.
+    `owner_user_id` берётся из токена, а не из тела запроса.
+servers:
+  - url: https://api.warmhouse.example/v1
+    description: API Gateway (синхронный клиентский API)
+security:
+  - bearerAuth: []
+tags:
+  - name: Scenarios
+    description: Управление сценариями автоматизации
+paths:
+  /scenarios:
+    post:
+      tags: [Scenarios]
+      summary: Создать сценарий
+      operationId: createScenario
+      description: |
+        Создаёт сценарий вместе с условиями и действиями (атомарно).
+        Пример - фирменный поток «влажность -> вентиляция».
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScenarioCreate'
+            examples:
+              humidity_vent:
+                summary: «Влажность > 70% дольше 60с -> включить вентилятор»
+                value:
+                  house_id: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+                  name: Антиплесень в ванной
+                  description: При высокой влажности включать вентиляцию
+                  enabled: true
+                  condition_logic: ALL
+                  trigger_type: telemetry
+                  trigger_spec:
+                    metric: humidity
+                  conditions:
+                    - source_device_id: 6ba7b810-9dad-11d1-80b4-00c04fd430c8
+                      metric: humidity
+                      operator: ">"
+                      threshold: 70
+                      for_duration_s: 60
+                  actions:
+                    - order_no: 1
+                      target_device_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                      command_template:
+                        capability: set_state
+                        args:
+                          power: "on"
+                          speed: 3
+      responses:
+        '201':
+          description: Сценарий создан
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Scenario'
+              examples:
+                created:
+                  value:
+                    id: c0ffee00-aaaa-4bbb-8ccc-000000000100
+                    house_id: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+                    owner_user_id: a11ce000-bbbb-4ccc-8ddd-000000000200
+                    name: Антиплесень в ванной
+                    description: При высокой влажности включать вентиляцию
+                    enabled: true
+                    condition_logic: ALL
+                    trigger_type: telemetry
+                    trigger_spec:
+                      metric: humidity
+                    created_at: '2026-06-20T10:25:00Z'
+                    updated_at: '2026-06-20T10:25:00Z'
+                    conditions:
+                      - id: d1d1d1d1-1111-4222-8333-000000000300
+                        source_device_id: 6ba7b810-9dad-11d1-80b4-00c04fd430c8
+                        metric: humidity
+                        operator: ">"
+                        threshold: 70
+                        for_duration_s: 60
+                    actions:
+                      - id: e2e2e2e2-1111-4222-8333-000000000400
+                        order_no: 1
+                        target_device_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                        command_template:
+                          capability: set_state
+                          args:
+                            power: "on"
+                            speed: 3
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          description: Bind-time ошибка - устройство из условия/действия не найдено или не принадлежит владельцу
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                bind:
+                  value:
+                    error:
+                      code: bind_validation_failed
+                      message: target_device_id not found in this house
+                      details:
+                        target_device_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+        '500':
+          $ref: '#/components/responses/ServerError'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  responses:
+    BadRequest:
+      description: Ошибка валидации запроса
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalid:
+              value:
+                error:
+                  code: validation_error
+                  message: at least one condition and one action are required
+    Unauthorized:
+      description: Отсутствует или невалиден Bearer-токен
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            unauth:
+              value:
+                error:
+                  code: unauthorized
+                  message: Missing or invalid bearer token
+    ServerError:
+      description: Внутренняя ошибка сервера
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            err:
+              value:
+                error:
+                  code: internal_error
+                  message: Unexpected error
+  schemas:
+    RuleCondition:
+      type: object
+      required: [source_device_id, metric, operator, threshold]
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        source_device_id:
+          type: string
+          format: uuid
+        metric:
+          type: string
+        operator:
+          type: string
+          enum: [">", ">=", "<", "<=", "==", "!="]
+        threshold:
+          type: number
+          format: double
+        for_duration_s:
+          type: integer
+          nullable: true
+          description: Гистерезис/дебаунс в секундах; null - срабатывает мгновенно
+    RuleAction:
+      type: object
+      required: [order_no, target_device_id, command_template]
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        order_no:
+          type: integer
+          description: Порядок выполнения действия
+        target_device_id:
+          type: string
+          format: uuid
+        command_template:
+          type: object
+          additionalProperties: true
+          description: Шаблон команды для Control (capability + args)
+    ScenarioCreate:
+      type: object
+      required: [house_id, name, condition_logic, trigger_type, conditions, actions]
+      properties:
+        house_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          maxLength: 150
+        description:
+          type: string
+          maxLength: 500
+          nullable: true
+        enabled:
+          type: boolean
+          default: true
+        condition_logic:
+          type: string
+          enum: [ALL, ANY]
+          description: ALL = AND, ANY = OR - режим объединения условий
+        trigger_type:
+          type: string
+          example: telemetry
+        trigger_spec:
+          type: object
+          additionalProperties: true
+          nullable: true
+        conditions:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/RuleCondition'
+        actions:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/RuleAction'
+    Scenario:
+      type: object
+      required: [id, house_id, owner_user_id, name, enabled, condition_logic, trigger_type, created_at, conditions, actions]
+      properties:
+        id:
+          type: string
+          format: uuid
+        house_id:
+          type: string
+          format: uuid
+        owner_user_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        enabled:
+          type: boolean
+        condition_logic:
+          type: string
+          enum: [ALL, ANY]
+        trigger_type:
+          type: string
+        trigger_spec:
+          type: object
+          additionalProperties: true
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+        conditions:
+          type: array
+          items:
+            $ref: '#/components/schemas/RuleCondition'
+        actions:
+          type: array
+          items:
+            $ref: '#/components/schemas/RuleAction'
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true
+              nullable: true
