@@ -1,0 +1,324 @@
+openapi: 3.0.3
+info:
+  title: Control API - «Тёплый дом»
+  version: 1.0.0
+  description: |
+    Generic-сервис команд: абстрактные команды устройствам и desired/reported state.
+    Вызывается синхронно - клиентом (через API Gateway) и другими сервисами (Scenario -> Control).
+    Сервис-владелец: **Control** (docs/c4/components_control.puml; ER - `device_state`, `commands`).
+
+    Команда принимается синхронно (`202 Accepted`) и доставляется асинхронно через Event Bus:
+    Control публикует `device.command`, Connectivity Gateway доставляет, итог приходит
+    событием `command.ack` (см. event-bus.asyncapi.yaml) и виден через `GET /commands/{commandId}`.
+    `command_id` - корреляция между REST и событиями шины.
+servers:
+  - url: https://api.warmhouse.example/v1
+    description: API Gateway (синхронный клиентский API)
+security:
+  - bearerAuth: []
+tags:
+  - name: Commands
+    description: Отправка и отслеживание команд
+  - name: State
+    description: Desired/reported состояние устройства
+paths:
+  /devices/{deviceId}/commands:
+    post:
+      tags: [Commands]
+      summary: Отправить команду устройству
+      operationId: sendCommand
+      description: |
+        Принимает абстрактную команду (capability + args). Control резолвит профиль/capabilities
+        у Device Management, формирует desired state и публикует `device.command` в шину.
+        Отвечает `202`: команда принята к доставке, но ещё не подтверждена устройством.
+      parameters:
+        - $ref: '#/components/parameters/DeviceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandRequest'
+            examples:
+              vent_on:
+                summary: Включить вентилятор на 3 скорости
+                value:
+                  capability: set_state
+                  args:
+                    power: "on"
+                    speed: 3
+      responses:
+        '202':
+          description: Команда принята к доставке
+          headers:
+            Location:
+              description: URL для опроса статуса команды
+              schema:
+                type: string
+                example: /commands/9f8e7d6c-3333-4444-8888-000000000010
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Command'
+              examples:
+                accepted:
+                  value:
+                    id: 9f8e7d6c-3333-4444-8888-000000000010
+                    device_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    payload:
+                      capability: set_state
+                      args:
+                        power: "on"
+                        speed: 3
+                    status: pending
+                    issued_at: '2026-06-20T10:20:00Z'
+                    acked_at: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Устройство офлайн - команда не может быть принята
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                offline:
+                  value:
+                    error:
+                      code: device_offline
+                      message: Device is offline
+        '422':
+          description: Capability не поддерживается профилем устройства
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                unsupported:
+                  value:
+                    error:
+                      code: capability_unsupported
+                      message: Profile does not support 'set_state.speed'
+                      details:
+                        capability: set_state
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /commands/{commandId}:
+    get:
+      tags: [Commands]
+      summary: Получить статус команды
+      operationId: getCommand
+      parameters:
+        - name: commandId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Текущий статус команды
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Command'
+              examples:
+                acked:
+                  value:
+                    id: 9f8e7d6c-3333-4444-8888-000000000010
+                    device_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    payload:
+                      capability: set_state
+                      args:
+                        power: "on"
+                        speed: 3
+                    status: acked
+                    issued_at: '2026-06-20T10:20:00Z'
+                    acked_at: '2026-06-20T10:20:02Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /devices/{deviceId}/state:
+    get:
+      tags: [State]
+      summary: Получить desired/reported state устройства
+      operationId: getDeviceState
+      parameters:
+        - $ref: '#/components/parameters/DeviceId'
+      responses:
+        '200':
+          description: Состояние устройства
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceState'
+              examples:
+                state:
+                  value:
+                    device_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                    desired:
+                      power: "on"
+                      speed: 3
+                    reported:
+                      power: "on"
+                      speed: 3
+                    desired_version: 12
+                    reported_version: 12
+                    last_reported_at: '2026-06-20T10:20:02Z'
+                    updated_at: '2026-06-20T10:20:02Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    DeviceId:
+      name: deviceId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  responses:
+    BadRequest:
+      description: Ошибка валидации запроса
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalid:
+              value:
+                error:
+                  code: validation_error
+                  message: capability is required
+    Unauthorized:
+      description: Отсутствует или невалиден Bearer-токен
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            unauth:
+              value:
+                error:
+                  code: unauthorized
+                  message: Missing or invalid bearer token
+    NotFound:
+      description: Ресурс не найден или не принадлежит владельцу
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            nf:
+              value:
+                error:
+                  code: not_found
+                  message: Device not found
+    ServerError:
+      description: Внутренняя ошибка сервера
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            err:
+              value:
+                error:
+                  code: internal_error
+                  message: Unexpected error
+  schemas:
+    CommandRequest:
+      type: object
+      required: [capability, args]
+      properties:
+        capability:
+          type: string
+          description: Абстрактная capability из профиля устройства
+          example: set_state
+        args:
+          type: object
+          additionalProperties: true
+          description: Аргументы команды (структура зависит от capability)
+    Command:
+      type: object
+      required: [id, device_id, payload, status, issued_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        device_id:
+          type: string
+          format: uuid
+        payload:
+          type: object
+          additionalProperties: true
+        status:
+          type: string
+          enum: [pending, sent, acked, failed, timeout]
+        issued_at:
+          type: string
+          format: date-time
+        acked_at:
+          type: string
+          format: date-time
+          nullable: true
+    DeviceState:
+      type: object
+      required: [device_id, desired_version, reported_version, updated_at]
+      properties:
+        device_id:
+          type: string
+          format: uuid
+        desired:
+          type: object
+          additionalProperties: true
+          nullable: true
+        reported:
+          type: object
+          additionalProperties: true
+          nullable: true
+        desired_version:
+          type: integer
+          format: int64
+        reported_version:
+          type: integer
+          format: int64
+        last_reported_at:
+          type: string
+          format: date-time
+          nullable: true
+        updated_at:
+          type: string
+          format: date-time
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true
+              nullable: true

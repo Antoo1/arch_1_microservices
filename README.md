@@ -173,11 +173,44 @@ Device 1-1 DeviceState · Device 1-N Command/TelemetryData · Scenario 1-N Condi
 
 ### 1. Тип API
 
-Укажите, какой тип API вы будете использовать для взаимодействия микросервисов. Объясните своё решение.
+Используются **два типа API** - это прямое следствие архитектуры из задания 2, которая
+разделяет синхронные REST-вызовы и асинхронный обмен через Event Bus:
+
+- **REST** - синхронное «запрос-ответ», где нужен немедленный ответ. Покрывает
+  два вида взаимодействия:
+  - **синхронный клиентский API** - клиент -> API Gateway -> сервисы (регистрация устройства,
+    чтение состояния и показаний, отправка команды, создание сценария);
+  - **синхронный межсервисный API** - сервис -> сервис (Control -> Device Management за
+    профилем/capabilities, Scenario -> Control для оркестрации команды).
+- **AsyncAPI** - асинхронный обмен через Event Bus (Kafka): телеметрия и команды, где
+  немедленный ответ не нужен или невозможен (устройство может быть офлайн).
+
+**Мост sync↔async.** Команда устройству показывает оба стиля в связке: REST `POST
+/devices/{id}/commands` принимает команду и сразу отвечает `202 Accepted`, не дожидаясь железа;
+реальная доставка идёт событием `device.command` в шину, а результат возвращается событием
+`command.ack` и виден через REST `GET /commands/{id}`. `command_id` - корреляция между REST и
+событиями (см. поток в [code_command_sequence.puml](docs/c4/code_command_sequence.puml)).
+
 
 ### 2. Документация API
 
-Здесь приложите ссылки на документацию API для микросервисов, которые вы спроектировали в первой части проектной работы. Для документирования используйте Swagger/OpenAPI или AsyncAPI.
+Спецификации - в [docs/api/](docs/api/). Покрыт реактивный поток «влажность -> вентиляция»:
+7 REST-эндпоинтов в 4 сервисах + 3 канала Event Bus.
+
+**REST (OpenAPI):**
+
+| Сервис | Спецификация | Эндпоинты |
+|---|---|---|
+| Device Management | [device-management.openapi.yaml](docs/api/device-management.openapi.yaml) | `POST /devices`, `GET /devices/{id}` |
+| Control | [control.openapi.yaml](docs/api/control.openapi.yaml) | `POST /devices/{id}/commands`, `GET /devices/{id}/state`, `GET /commands/{id}` |
+| Telemetry | [telemetry.openapi.yaml](docs/api/telemetry.openapi.yaml) | `GET /devices/{id}/telemetry` |
+| Scenario | [scenario.openapi.yaml](docs/api/scenario.openapi.yaml) | `POST /scenarios` |
+
+**Async (AsyncAPI):**
+
+| Спецификация | Каналы |
+|---|---|
+| [event-bus.asyncapi.yaml](docs/api/event-bus.asyncapi.yaml) | `telemetry.received`, `device.command`, `command.ack` |
 
 # Задание 5. Работа с docker и docker-compose
 
