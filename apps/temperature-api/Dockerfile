@@ -1,0 +1,31 @@
+# Build stage
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /app
+
+# This service uses only the standard library, so there is no go.sum and nothing
+# to download - copy go.mod only.
+COPY go.mod ./
+
+# Copy the source code
+COPY . .
+
+# Build the application
+RUN CGO_ENABLED=0 GOOS=linux go build -o temperature-api
+
+# Runtime stage
+FROM alpine:latest
+
+# tzdata so timestamps render correctly; ca-certificates for parity with the app image
+RUN apk --no-cache add ca-certificates tzdata
+
+WORKDIR /app
+
+# Copy the binary from the builder stage
+COPY --from=builder /app/temperature-api .
+
+# Expose the port the app runs on
+EXPOSE 8081
+
+# Command to run the application
+CMD ["./temperature-api"]
